@@ -16,61 +16,10 @@ jobs:
       - name: Kodu Cek
         uses: actions/checkout@v4
 
-      - name: Klasor ve Info.plist Olustur
+      - name: Proje Yapisi Olustur
         run: |
           mkdir -p Sources
           cp App.swift Sources/App.swift
-
-          cat << 'EOF' > Info.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>ImmortalDL</string>
-              <key>CFBundleExecutable</key>
-              <string>$(EXECUTABLE_NAME)</string>
-              <key>CFBundleIdentifier</key>
-              <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>$(PRODUCT_NAME)</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>2.0</string>
-              <key>CFBundleVersion</key>
-              <string>2</string>
-              <key>UILaunchScreen</key>
-              <dict/>
-              <key>UIBackgroundModes</key>
-              <array>
-                  <string>audio</string>
-                  <string>location</string>
-                  <string>fetch</string>
-                  <string>processing</string>
-              </array>
-              <key>NSLocationWhenInUseUsageDescription</key>
-              <string>Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir.</string>
-              <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-              <string>Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir.</string>
-              <key>NSLocationAlwaysUsageDescription</key>
-              <string>Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir.</string>
-              <key>UIFileSharingEnabled</key>
-              <true/>
-              <key>LSSupportsOpeningDocumentsInPlace</key>
-              <true/>
-              <key>NSAppTransportSecurity</key>
-              <dict>
-                  <key>NSAllowsArbitraryLoads</key>
-                  <true/>
-              </dict>
-          </dict>
-          </plist>
-          EOF
 
           cat << 'EOF' > project.yml
           name: ImmortalDL
@@ -86,6 +35,21 @@ jobs:
                 - Sources
               info:
                 path: Info.plist
+                properties:
+                  CFBundleDisplayName: ImmortalDL
+                  UILaunchScreen: {}
+                  UIBackgroundModes:
+                    - audio
+                    - location
+                    - fetch
+                    - processing
+                  NSLocationWhenInUseUsageDescription: "Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir."
+                  NSLocationAlwaysAndWhenInUseUsageDescription: "Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir."
+                  NSLocationAlwaysUsageDescription: "Arkaplanda indirmelerin durmamasi icin konum kilidi kullanilir."
+                  UIFileSharingEnabled: true
+                  LSSupportsOpeningDocumentsInPlace: true
+                  NSAppTransportSecurity:
+                    NSAllowsArbitraryLoads: true
               settings:
                 base:
                   PRODUCT_BUNDLE_IDENTIFIER: com.sait.immortaldl
@@ -107,6 +71,9 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
+
+          echo "=== DERLENEN INFO.PLIST KONTROLU ==="
+          plutil -p build/Build/Products/Release-iphoneos/ImmortalDL.app/Info.plist
 
       - name: IPA Paketle
         run: |
