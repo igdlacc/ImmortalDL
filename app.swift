@@ -1,6 +1,8 @@
 import SwiftUI
 import WebKit
 import AVFoundation
+import MediaPlayer
+import CoreLocation
 import UserNotifications
 
 @main
@@ -14,19 +16,39 @@ struct ImmortalDLApp: App {
                 .preferredColorScheme(.dark)
                 .onAppear {
                     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+                    KeepAliveEngine.shared.requestPermissions()
                 }
         }
     }
 }
 
-// MARK: - 1. ÖLÜMSÜZ ARKAPLAN MOTORU (SESSİZ SES HİLESİ)
-final class KeepAliveEngine {
+// MARK: - 1. NÜKLEER ARKAPLAN MOTORU (SES + DYNAMIC ISLAND MEDYA + GPS KONUM + BG TASK)
+final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
     static let shared = KeepAliveEngine()
+    
     private var audioPlayer: AVAudioPlayer?
+    private let locationManager = CLLocationManager()
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
+    private var bgTimer: Timer?
     private(set) var isRunning = false
     
-    private init() {
+    var playAudibleTick: Bool = false {
+        didSet {
+            if isRunning {
+                restartAudioPlayer()
+            }
+        }
+    }
+    
+    private override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        locationManager.pausesLocationUpdatesAutomatically = false
+        
+        setupRemoteTransportControls()
+        
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleInterruption),
@@ -35,39 +57,160 @@ final class KeepAliveEngine {
         )
     }
     
+    func requestPermissions() {
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.requestAlwaysAuthorization()
+    }
+    
+    private func setupRemoteTransportControls() {
+        UIApplication.shared.beginReceivingRemoteControlEvents()
+        let commandCenter = MPRemoteCommandCenter.shared()
+        
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.playCommand.addTarget { _ in
+            return .success
+        }
+        
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.pauseCommand.addTarget { _ in
+            return .success
+        }
+    }
+    
     func start() {
         guard !isRunning else { return }
         isRunning = true
         
+        // 1. Ses + Dynamic Island Medya Oturumu
+        restartAudioPlayer()
+        
+        // 2. GPS / Navigasyon Arkaplan Kilidi
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.showsBackgroundLocationIndicator = true
+        locationManager.startUpdatingLocation()
+        
+        // 3. Background Task Sayacı Yenileyici
+        renewBackgroundTask()
+        bgTimer?.invalidate()
+        bgTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.renewBackgroundTask()
+            if let player = self?.audioPlayer, !player.isPlaying {
+                try? AVAudioSession.sharedInstance().setActive(true)
+                player.play()
+            }
+        }
+        
+        updateNowPlaying(fileName: "İndirme Hazırlanıyor...", percent: 0, speedText: "0 KB/sn", sizeText: "Başlatılıyor")
+    }
+    
+    func restartAudioPlayer() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // mixWithOthers KAPALI -> Uygulama doğrudan Dynamic Island ve Kilit Ekranına yerleşir!
+            try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
             
-            let wavData = generateSilentWav()
+            audioPlayer?.stop()
+            let wavData = generateKeepAliveWav(audible: playAudibleTick)
             audioPlayer = try AVAudioPlayer(data: wavData)
-            audioPlayer?.numberOfLoops = -1 // Sonsuz döngü
-            audioPlayer?.volume = 1.0 // Veri zaten 0 (dijital sessizlik) olduğu için ses çıkmaz ama iOS uyutmaz
+            audioPlayer?.numberOfLoops = -1
+            audioPlayer?.volume = 1.0
             audioPlayer?.prepareToPlay()
             audioPlayer?.play()
         } catch {
             print("KeepAlive Audio Hatası: \(error)")
-        }
-        
-        if bgTask == .invalid {
-            bgTask = UIApplication.shared.beginBackgroundTask(withName: "ImmortalDLTask") { [weak self] in
-                self?.endBgTask()
-            }
         }
     }
     
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        
+        bgTimer?.invalidate()
+        bgTimer = nil
+        
         audioPlayer?.stop()
         audioPlayer = nil
+        
+        locationManager.stopUpdatingLocation()
+        locationManager.allowsBackgroundLocationUpdates = false
+        
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         endBgTask()
+    }
+    
+    func updateNowPlaying(fileName: String, percent: Int, speedText: String, sizeText: String) {
+        guard isRunning else { return }
+        DispatchQueue.main.async {
+            let badgeImage = Self.renderArtwork(percent: percent, speed: speedText)
+            let artwork = MPMediaItemArtwork(boundsSize: badgeImage.size) { _ in badgeImage }
+            
+            var info = [String: Any]()
+            info[MPMediaItemPropertyTitle] = "⏬ %\(percent) • \(fileName)"
+            info[MPMediaItemPropertyArtist] = "\(speedText) • \(sizeText)"
+            info[MPMediaItemPropertyAlbumTitle] = "ImmortalDL Arkaplan Motoru"
+            info[MPMediaItemPropertyPlaybackDuration] = 100.0
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(percent)
+            info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+            info[MPMediaItemPropertyArtwork] = artwork
+            
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
+    }
+    
+    // Dynamic Island ve Kilit Ekranı için canlı yüzde (%) kapağı çizer
+    private static func renderArtwork(percent: Int, speed: String) -> UIImage {
+        let size = CGSize(width: 240, height: 240)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            let rect = CGRect(origin: .zero, size: size)
+            UIColor(red: 0.06, green: 0.10, blue: 0.20, alpha: 1.0).setFill()
+            ctx.fill(rect)
+            
+            // İlerleme Çemberi
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius: CGFloat = 95
+            let bgPath = UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true)
+            bgPath.lineWidth = 16
+            UIColor.darkGray.setStroke()
+            bgPath.stroke()
+            
+            let endAngle = (-CGFloat.pi / 2) + (CGFloat(percent) / 100.0) * (.pi * 2)
+            let fgPath = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: endAngle, clockwise: true)
+            fgPath.lineWidth = 16
+            fgPath.lineCapStyle = .round
+            UIColor.systemGreen.setStroke()
+            fgPath.stroke()
+            
+            // Yüzde Yazısı
+            let pText = "%\(percent)" as NSString
+            let pAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 54, weight: .heavy),
+                .foregroundColor: UIColor.white
+            ]
+            let pSize = pText.size(withAttributes: pAttrs)
+            pText.draw(at: CGPoint(x: (size.width - pSize.width) / 2, y: (size.height - pSize.height) / 2 - 12), withAttributes: pAttrs)
+            
+            // Hız Yazısı
+            let sText = speed as NSString
+            let sAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: UIColor.systemCyan
+            ]
+            let sSize = sText.size(withAttributes: sAttrs)
+            sText.draw(at: CGPoint(x: (size.width - sSize.width) / 2, y: (size.height / 2) + 28), withAttributes: sAttrs)
+        }
+    }
+    
+    private func renewBackgroundTask() {
+        let oldTask = bgTask
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "ImmortalLoop") { [weak self] in
+            self?.endBgTask()
+        }
+        if oldTask != .invalid {
+            UIApplication.shared.endBackgroundTask(oldTask)
+        }
     }
     
     private func endBgTask() {
@@ -79,15 +222,21 @@ final class KeepAliveEngine {
     
     @objc private func handleInterruption(_ notification: Notification) {
         guard isRunning else { return }
-        try? AVAudioSession.sharedInstance().setActive(true)
-        audioPlayer?.play()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.isRunning else { return }
+            try? AVAudioSession.sharedInstance().setActive(true)
+            self.audioPlayer?.play()
+        }
     }
     
-    // Harici dosyaya ihtiyaç duymadan bellekte 1 saniyelik 0 dB WAV üretir
-    private func generateSilentWav() -> Data {
-        let sampleRate: UInt32 = 8000
-        let dataSize: UInt32 = sampleRate * 2
-        let fileSize: UInt32 = 36 + dataSize
+    // CoreAudio'nun "sessizlik" filtresini aşan gerçek 20Hz alt-frekans dalgası (veya duyulur tik-tak sesi)
+    private func generateKeepAliveWav(audible: Bool) -> Data {
+        let sampleRate: Int = 8000
+        let durationSeconds: Int = 4
+        let totalSamples = sampleRate * durationSeconds
+        let dataSize = UInt32(totalSamples * 2)
+        let fileSize = UInt32(36 + dataSize)
+        
         var data = Data()
         data.append("RIFF".data(using: .ascii)!)
         var fs = fileSize.littleEndian; data.append(Data(bytes: &fs, count: 4))
@@ -95,18 +244,43 @@ final class KeepAliveEngine {
         var fmtSize: UInt32 = 16; data.append(Data(bytes: &fmtSize, count: 4))
         var audioFmt: UInt16 = 1; data.append(Data(bytes: &audioFmt, count: 2))
         var channels: UInt16 = 1; data.append(Data(bytes: &channels, count: 2))
-        var sr = sampleRate.littleEndian; data.append(Data(bytes: &sr, count: 4))
-        var byteRate = (sampleRate * 2).littleEndian; data.append(Data(bytes: &byteRate, count: 4))
+        var sr = UInt32(sampleRate).littleEndian; data.append(Data(bytes: &sr, count: 4))
+        var byteRate = UInt32(sampleRate * 2).littleEndian; data.append(Data(bytes: &byteRate, count: 4))
         var align: UInt16 = 2; data.append(Data(bytes: &align, count: 2))
         var bits: UInt16 = 16; data.append(Data(bytes: &bits, count: 2))
         data.append("data".data(using: .ascii)!)
         var ds = dataSize.littleEndian; data.append(Data(bytes: &ds, count: 4))
-        data.append(Data(count: Int(dataSize)))
+        
+        var samples = [Int16](repeating: 0, count: totalSamples)
+        for i in 0..<totalSamples {
+            let t = Double(i) / Double(sampleRate)
+            if audible {
+                // Her saniye başında 40ms boyunca yumuşak bir "tik" sesi verir
+                if i % sampleRate < 320 {
+                    samples[i] = Int16(sin(2.0 * .pi * 600.0 * t) * 3500.0)
+                } else {
+                    samples[i] = Int16(sin(2.0 * .pi * 20.0 * t) * 80.0)
+                }
+            } else {
+                // İnsan kulağının duyamayacağı ama iOS'un aktif ses gördüğü 18 Hz sinüs dalgası
+                samples[i] = Int16(sin(2.0 * .pi * 18.0 * t) * 90.0)
+            }
+        }
+        
+        samples.withUnsafeBufferPointer { buffer in
+            data.append(buffer)
+        }
         return data
     }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        // GPS akışı uygulamayı uyanık tutar
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 }
 
-// MARK: - 2. İNDİRME MODELİ VE MOTORU (RANGE DESTEKLİ & OTO-DEVAM)
+// MARK: - 2. İNDİRME MODELİ VE MOTORU
 enum DLStatus: String {
     case downloading = "İndiriliyor"
     case paused = "Duraklatıldı"
@@ -155,6 +329,11 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
     
     @Published var items: [DownloadItem] = []
     @Published var isKeepAliveActive: Bool = false
+    @Published var audibleTickEnabled: Bool = false {
+        didSet {
+            KeepAliveEngine.shared.playAudibleTick = audibleTickEnabled
+        }
+    }
     @Published var toastMessage: String? = nil
     
     private var session: URLSession!
@@ -168,6 +347,9 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 86400 * 7
         config.waitsForConnectivity = true
+        config.shouldUseExtendedBackgroundIdleMode = true
+        config.networkServiceType = .avStreaming // İndirmeyi medya akışı önceliğinde tutar!
+        
         let opQueue = OperationQueue()
         opQueue.maxConcurrentOperationCount = 4
         opQueue.underlyingQueue = queue
@@ -220,6 +402,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
             
             var request = URLRequest(url: item.url)
             request.httpMethod = "GET"
+            request.networkServiceType = .avStreaming
             if existingBytes > 0 {
                 request.setValue("bytes=\(existingBytes)-", forHTTPHeaderField: "Range")
             }
@@ -295,6 +478,29 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         }
     }
     
+    private func refreshLockScreenWidget() {
+        let activeItems = items.filter { $0.status == .downloading || $0.status == .retrying }
+        guard let first = activeItems.first else { return }
+        
+        let percent = Int(first.progress * 100)
+        let spd = "\(formatByteCount(Int64(first.speedBytesPerSec)))/sn"
+        let sz = "\(formatByteCount(first.downloadedBytes)) / \(first.totalBytes > 0 ? formatByteCount(first.totalBytes) : "?")"
+        
+        KeepAliveEngine.shared.updateNowPlaying(
+            fileName: first.fileName,
+            percent: percent,
+            speedText: spd,
+            sizeText: sz
+        )
+    }
+    
+    private func formatByteCount(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB, .useKB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
     func showToast(_ text: String) {
         DispatchQueue.main.async {
             self.toastMessage = text
@@ -322,13 +528,11 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
             return
         }
         
-        // Sunucu Range desteklemiyorsa (200 döndüyse) dosyayı sıfırdan yaz
         if statusCode == 200 && transfer.downloadedBytes > 0 {
             transfer.downloadedBytes = 0
             try? transfer.fileHandle?.truncate(atOffset: 0)
         }
         
-        // Sunucudan gelen gerçek dosya adını yakala
         if transfer.downloadedBytes == 0, let suggested = response.suggestedFilename {
             let cleanSuggested = suggested.removingPercentEncoding ?? suggested
             let newURL = documentsDirectory.appendingPathComponent(cleanSuggested)
@@ -357,6 +561,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         DispatchQueue.main.async {
             if let idx = self.items.firstIndex(where: { $0.id == id }) {
                 self.items[idx].totalBytes = total
+                self.refreshLockScreenWidget()
             }
         }
         
@@ -378,7 +583,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         
         let now = Date()
         let elapsed = now.timeIntervalSince(transfer.lastSpeedTime)
-        if elapsed >= 0.3 {
+        if elapsed >= 0.4 {
             transfer.currentSpeed = Double(transfer.bytesSinceLastSpeed) / elapsed
             transfer.bytesSinceLastSpeed = 0
             transfer.lastSpeedTime = now
@@ -392,6 +597,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
                     self.items[idx].downloadedBytes = dl
                     if total > 0 { self.items[idx].totalBytes = total }
                     self.items[idx].speedBytesPerSec = spd
+                    self.refreshLockScreenWidget()
                 }
             }
         }
@@ -407,13 +613,13 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         if let error = error as NSError? {
             if error.code == NSURLErrorCancelled { return }
             
-            // Otomatik Yeniden Bağlanma (3 saniye sonra kaldığı byte'tan devam eder)
             DispatchQueue.main.async {
                 guard let idx = self.items.firstIndex(where: { $0.id == id }) else { return }
                 if self.items[idx].status == .paused { return }
                 self.items[idx].status = .retrying
                 self.items[idx].speedBytesPerSec = 0
                 self.items[idx].errorMessage = "Bağlantı koptu, 3 sn içinde devam edecek..."
+                self.refreshLockScreenWidget()
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     if let currentIdx = self.items.firstIndex(where: { $0.id == id }),
@@ -448,7 +654,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
     
     private func sendNotification(fileName: String) {
         let content = UNMutableNotificationContent()
-        content.title = "İndirme Tamamlandı"
+        content.title = "İndirme Tamamlandı ✅"
         content.body = "\(fileName) Dosyalar uygulamasına kaydedildi."
         content.sound = .default
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
@@ -524,9 +730,8 @@ final class BrowserViewModel: NSObject, ObservableObject, WKNavigationDelegate, 
         }
     }
     
-    // Pop-up / Yeni Sekme (_blank) Koruması
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+        if navigationAction.targetFrame == nil {
             webView.load(navigationAction.request)
         }
         return nil
@@ -649,16 +854,24 @@ struct DownloadsTabView: View {
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 12) {
-                // Arkaplan Durum Göstergesi
-                HStack {
-                    Circle()
-                        .fill(manager.isKeepAliveActive ? Color.green : Color.gray)
-                        .frame(width: 10, height: 10)
-                    Text(manager.isKeepAliveActive ? "Ölümsüz Arkaplan Aktif (Uygulama Kapanmaz)" : "Arkaplan Motoru Beklemede")
-                        .font(.caption.bold())
-                        .foregroundColor(manager.isKeepAliveActive ? .green : .secondary)
-                    Spacer()
+            VStack(spacing: 10) {
+                // Durum ve Test Sesi Paneli
+                VStack(spacing: 6) {
+                    HStack {
+                        Circle()
+                            .fill(manager.isKeepAliveActive ? Color.green : Color.gray)
+                            .frame(width: 10, height: 10)
+                        Text(manager.isKeepAliveActive ? "Dynamic Island + GPS + Ses Kilidi AKTİF" : "Arkaplan Motoru Beklemede")
+                            .font(.caption.bold())
+                            .foregroundColor(manager.isKeepAliveActive ? .green : .secondary)
+                        Spacer()
+                    }
+                    
+                    Toggle(isOn: $manager.audibleTickEnabled) {
+                        Text("Duyulur Test Sesi (Arkaplanda Tık-Tık Duy)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.top, 4)
@@ -701,13 +914,12 @@ struct DownloadsTabView: View {
                 if manager.items.isEmpty {
                     Spacer()
                     VStack(spacing: 8) {
-                        Image(systemName: "tray.and.arrow.down")
+                        Image(systemName: "bolt.shield.fill")
                             .font(.system(size: 48))
-                            .foregroundColor(.secondary)
-                        Text("Henüz indirme yok")
+                            .foregroundColor(.blue)
+                        Text("Nükleer Arkaplan Hazır")
                             .font(.headline)
-                            .foregroundColor(.secondary)
-                        Text("İndirilen her şey iPhone'un 'Dosyalar -> ImmortalDL' klasörüne kaydedilir.")
+                        Text("İndirme başladığında Dynamic Island'a ve Kilit Ekranına canlı yüzde (%) ve hız göstergesi yerleşir.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -723,7 +935,7 @@ struct DownloadsTabView: View {
                     .listStyle(PlainListStyle())
                 }
             }
-            .navigationTitle("ImmortalDL")
+            .navigationTitle("ImmortalDL v2")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
