@@ -1,0 +1,111 @@
+name: Build ImmortalDL IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+
+    steps:
+      - name: Kodu Cek
+        uses: actions/checkout@v4
+
+      - name: Klasor ve Info.plist Olustur
+        run: |
+          mkdir -p Sources
+          cp App.swift Sources/App.swift
+
+          cat << 'EOF' > Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>ImmortalDL</string>
+              <key>CFBundleExecutable</key>
+              <string>$(EXECUTABLE_NAME)</string>
+              <key>CFBundleIdentifier</key>
+              <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>$(PRODUCT_NAME)</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UIBackgroundModes</key>
+              <array>
+                  <string>audio</string>
+                  <string>fetch</string>
+                  <string>processing</string>
+              </array>
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <key>NSAllowsArbitraryLoads</key>
+                  <true/>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
+          cat << 'EOF' > project.yml
+          name: ImmortalDL
+          options:
+            bundleIdPrefix: com.sait
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            ImmortalDL:
+              type: application
+              platform: iOS
+              sources:
+                - Sources
+              info:
+                path: Info.plist
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.sait.immortaldl
+                  SWIFT_VERSION: "5.0"
+                  TARGETED_DEVICE_FAMILY: "1,2"
+                  GENERATE_INFOPLIST_FILE: NO
+          EOF
+
+      - name: Xcode Projesi Uret ve Derle
+        run: |
+          which xcodegen || brew install xcodegen
+          xcodegen generate
+
+          xcodebuild -project ImmortalDL.xcodeproj \
+            -scheme ImmortalDL \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: IPA Paketle
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/ImmortalDL.app Payload/
+          zip -r ImmortalDL.ipa Payload
+
+      - name: IPA Dosyasini Yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalDL-IPA
+          path: ImmortalDL.ipa
