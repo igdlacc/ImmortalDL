@@ -34,10 +34,30 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
     
     var playAudibleTick: Bool = false {
         didSet {
-            if isRunning {
-                restartAudioPlayer()
+            DispatchQueue.main.async {
+                if self.playAudibleTick && !self.isRunning {
+                    // Kullanıcı şalteri açtığı an indirme olmasa bile motoru ateşle ve test et!
+                    self.start()
+                    DownloadManager.shared.isKeepAliveActive = true
+                } else if self.isRunning {
+                    self.restartAudioPlayer()
+                    if !self.playAudibleTick && !DownloadManager.shared.hasActiveDownloads {
+                        self.stop()
+                        DownloadManager.shared.isKeepAliveActive = false
+                    }
+                }
             }
         }
+    }
+    
+    var configuredBgModes: String {
+        let modes = Bundle.main.infoDictionary?["UIBackgroundModes"] as? [String] ?? []
+        return modes.isEmpty ? "EKSİK ❌" : modes.joined(separator: ", ") + " ✅"
+    }
+    
+    private var hasLocationBgCapability: Bool {
+        let modes = Bundle.main.infoDictionary?["UIBackgroundModes"] as? [String] ?? []
+        return modes.contains("location")
     }
     
     private override init() {
@@ -63,50 +83,74 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
     }
     
     private func setupRemoteTransportControls() {
-        UIApplication.shared.beginReceivingRemoteControlEvents()
-        let commandCenter = MPRemoteCommandCenter.shared()
-        
-        commandCenter.playCommand.isEnabled = true
-        commandCenter.playCommand.addTarget { _ in
-            return .success
-        }
-        
-        commandCenter.pauseCommand.isEnabled = true
-        commandCenter.pauseCommand.addTarget { _ in
-            return .success
+        DispatchQueue.main.async {
+            UIApplication.shared.beginReceivingRemoteControlEvents()
+            let commandCenter = MPRemoteCommandCenter.shared()
+            
+            commandCenter.playCommand.isEnabled = true
+            commandCenter.playCommand.addTarget { [weak self] _ in
+                self?.audioPlayer?.play()
+                return .success
+            }
+            
+            commandCenter.pauseCommand.isEnabled = true
+            commandCenter.pauseCommand.addTarget { [weak self] _ in
+                self?.audioPlayer?.play() // Durdurmaya izin verme, çalmaya devam et
+                return .success
+            }
         }
     }
     
     func start() {
-        guard !isRunning else { return }
-        isRunning = true
-        
-        // 1. Ses + Dynamic Island Medya Oturumu
-        restartAudioPlayer()
-        
-        // 2. GPS / Navigasyon Arkaplan Kilidi
-        locationManager.allowsBackgroundLocationUpdates = true
-        locationManager.showsBackgroundLocationIndicator = true
-        locationManager.startUpdatingLocation()
-        
-        // 3. Background Task Sayacı Yenileyici
-        renewBackgroundTask()
-        bgTimer?.invalidate()
-        bgTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.renewBackgroundTask()
-            if let player = self?.audioPlayer, !player.isPlaying {
-                try? AVAudioSession.sharedInstance().setActive(true)
-                player.play()
+        DispatchQueue.main.async {
+            if !self.isRunning {
+                self.isRunning = true
+                self.restartAudioPlayer()
+                self.startSafeLocationUpdates()
+                self.renewBackgroundTask()
+                
+                self.bgTimer?.invalidate()
+                self.bgTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                    guard let self = self, self.isRunning else { return }
+                    self.renewBackgroundTask()
+                    if let player = self.audioPlayer, !player.isPlaying {
+                        try? AVAudioSession.sharedInstance().setActive(true)
+                        player.play()
+                    }
+                }
+                
+                self.updateNowPlaying(
+                    fileName: self.playAudibleTick ? "Arkaplan Test Modu Aktif" : "İndirme Hazırlanıyor...",
+                    percent: 0,
+                    speedText: "Aktif",
+                    sizeText: "Kilit Açık"
+                )
             }
         }
-        
-        updateNowPlaying(fileName: "İndirme Hazırlanıyor...", percent: 0, speedText: "0 KB/sn", sizeText: "Başlatılıyor")
+    }
+    
+    private func startSafeLocationUpdates() {
+        let status = locationManager.authorizationStatus
+        guard status == .authorizedAlways || status == .authorizedWhenInUse else {
+            locationManager.requestWhenInUseAuthorization()
+            return
+        }
+        if hasLocationBgCapability {
+            locationManager.allowsBackgroundLocationUpdates = true
+            locationManager.showsBackgroundLocationIndicator = true
+        }
+        locationManager.startUpdatingLocation()
+    }
+    
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if isRunning {
+            startSafeLocationUpdates()
+        }
     }
     
     func restartAudioPlayer() {
         do {
             let session = AVAudioSession.sharedInstance()
-            // mixWithOthers KAPALI -> Uygulama doğrudan Dynamic Island ve Kilit Ekranına yerleşir!
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
             
@@ -123,21 +167,25 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
     }
     
     func stop() {
-        guard isRunning else { return }
-        isRunning = false
-        
-        bgTimer?.invalidate()
-        bgTimer = nil
-        
-        audioPlayer?.stop()
-        audioPlayer = nil
-        
-        locationManager.stopUpdatingLocation()
-        locationManager.allowsBackgroundLocationUpdates = false
-        
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        endBgTask()
+        DispatchQueue.main.async {
+            guard self.isRunning else { return }
+            self.isRunning = false
+            
+            self.bgTimer?.invalidate()
+            self.bgTimer = nil
+            
+            self.audioPlayer?.stop()
+            self.audioPlayer = nil
+            
+            self.locationManager.stopUpdatingLocation()
+            if self.hasLocationBgCapability {
+                self.locationManager.allowsBackgroundLocationUpdates = false
+            }
+            
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            self.endBgTask()
+        }
     }
     
     func updateNowPlaying(fileName: String, percent: Int, speedText: String, sizeText: String) {
@@ -159,7 +207,6 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
         }
     }
     
-    // Dynamic Island ve Kilit Ekranı için canlı yüzde (%) kapağı çizer
     private static func renderArtwork(percent: Int, speed: String) -> UIImage {
         let size = CGSize(width: 240, height: 240)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -168,7 +215,6 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
             UIColor(red: 0.06, green: 0.10, blue: 0.20, alpha: 1.0).setFill()
             ctx.fill(rect)
             
-            // İlerleme Çemberi
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius: CGFloat = 95
             let bgPath = UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: true)
@@ -183,7 +229,6 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
             UIColor.systemGreen.setStroke()
             fgPath.stroke()
             
-            // Yüzde Yazısı
             let pText = "%\(percent)" as NSString
             let pAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 54, weight: .heavy),
@@ -192,7 +237,6 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
             let pSize = pText.size(withAttributes: pAttrs)
             pText.draw(at: CGPoint(x: (size.width - pSize.width) / 2, y: (size.height - pSize.height) / 2 - 12), withAttributes: pAttrs)
             
-            // Hız Yazısı
             let sText = speed as NSString
             let sAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 22, weight: .bold),
@@ -229,10 +273,9 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
         }
     }
     
-    // CoreAudio'nun "sessizlik" filtresini aşan gerçek 20Hz alt-frekans dalgası (veya duyulur tik-tak sesi)
     private func generateKeepAliveWav(audible: Bool) -> Data {
         let sampleRate: Int = 8000
-        let durationSeconds: Int = 4
+        let durationSeconds: Int = 2
         let totalSamples = sampleRate * durationSeconds
         let dataSize = UInt32(totalSamples * 2)
         let fileSize = UInt32(36 + dataSize)
@@ -255,28 +298,25 @@ final class KeepAliveEngine: NSObject, CLLocationManagerDelegate {
         for i in 0..<totalSamples {
             let t = Double(i) / Double(sampleRate)
             if audible {
-                // Her saniye başında 40ms boyunca yumuşak bir "tik" sesi verir
-                if i % sampleRate < 320 {
-                    samples[i] = Int16(sin(2.0 * .pi * 600.0 * t) * 3500.0)
+                // Net duyulur "Tik-Tak" bip sesi (800 Hz)
+                if i % sampleRate < 400 {
+                    samples[i] = Int16(sin(2.0 * .pi * 800.0 * t) * 10000.0)
                 } else {
-                    samples[i] = Int16(sin(2.0 * .pi * 20.0 * t) * 80.0)
+                    samples[i] = Int16(sin(2.0 * .pi * 20.0 * t) * 150.0)
                 }
             } else {
                 // İnsan kulağının duyamayacağı ama iOS'un aktif ses gördüğü 18 Hz sinüs dalgası
-                samples[i] = Int16(sin(2.0 * .pi * 18.0 * t) * 90.0)
+                samples[i] = Int16(sin(2.0 * .pi * 18.0 * t) * 150.0)
             }
         }
         
-        samples.withUnsafeBufferPointer { buffer in
-            data.append(buffer)
+        samples.withUnsafeBytes { rawBuffer in
+            data.append(contentsOf: rawBuffer)
         }
         return data
     }
     
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        // GPS akışı uygulamayı uyanık tutar
-    }
-    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {}
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 }
 
@@ -336,6 +376,10 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
     }
     @Published var toastMessage: String? = nil
     
+    var hasActiveDownloads: Bool {
+        items.contains { $0.status == .downloading || $0.status == .retrying }
+    }
+    
     private var session: URLSession!
     private var transfers: [UUID: ActiveTransfer] = [:]
     private var taskToItemID: [Int: UUID] = [:]
@@ -348,10 +392,10 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         config.timeoutIntervalForResource = 86400 * 7
         config.waitsForConnectivity = true
         config.shouldUseExtendedBackgroundIdleMode = true
-        config.networkServiceType = .avStreaming // İndirmeyi medya akışı önceliğinde tutar!
+        config.networkServiceType = .avStreaming
         
         let opQueue = OperationQueue()
-        opQueue.maxConcurrentOperationCount = 4
+        opQueue.maxConcurrentOperationCount = 1
         opQueue.underlyingQueue = queue
         session = URLSession(configuration: config, delegate: self, delegateQueue: opQueue)
     }
@@ -360,9 +404,16 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
     
+    private func sanitizeFileName(_ name: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        let cleaned = name.components(separatedBy: invalid).joined(separator: "_")
+        return cleaned.isEmpty ? "indirilen_\(Int(Date().timeIntervalSince1970)).bin" : cleaned
+    }
+    
     func addDownload(url: URL, cookies: String? = nil, userAgent: String? = nil, referer: String? = nil, suggestedName: String? = nil) {
         let rawName = suggestedName ?? (url.lastPathComponent.isEmpty || url.lastPathComponent == "/" ? "indirilen_\(Int(Date().timeIntervalSince1970)).bin" : url.lastPathComponent)
-        let cleanName = rawName.removingPercentEncoding ?? rawName
+        let decoded = rawName.removingPercentEncoding ?? rawName
+        let cleanName = sanitizeFileName(decoded)
         
         let item = DownloadItem(
             id: UUID(),
@@ -468,8 +519,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
     }
     
     private func updateKeepAliveState() {
-        let hasActive = items.contains { $0.status == .downloading || $0.status == .retrying }
-        if hasActive {
+        if hasActiveDownloads || audibleTickEnabled {
             KeepAliveEngine.shared.start()
             isKeepAliveActive = true
         } else {
@@ -534,7 +584,8 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDataDelegate 
         }
         
         if transfer.downloadedBytes == 0, let suggested = response.suggestedFilename {
-            let cleanSuggested = suggested.removingPercentEncoding ?? suggested
+            let decoded = suggested.removingPercentEncoding ?? suggested
+            let cleanSuggested = sanitizeFileName(decoded)
             let newURL = documentsDirectory.appendingPathComponent(cleanSuggested)
             if newURL != transfer.filePath {
                 try? transfer.fileHandle?.close()
@@ -855,8 +906,7 @@ struct DownloadsTabView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 10) {
-                // Durum ve Test Sesi Paneli
-                VStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Circle()
                             .fill(manager.isKeepAliveActive ? Color.green : Color.gray)
@@ -867,16 +917,19 @@ struct DownloadsTabView: View {
                         Spacer()
                     }
                     
+                    Text("Sistem İzinleri: \(KeepAliveEngine.shared.configuredBgModes)")
+                        .font(.caption2)
+                        .foregroundColor(.cyan)
+                    
                     Toggle(isOn: $manager.audibleTickEnabled) {
-                        Text("Duyulur Test Sesi (Arkaplanda Tık-Tık Duy)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Text("Duyulur Test Sesi (Açtığın An Tık-Tık Çalar)")
+                            .font(.caption.bold())
+                            .foregroundColor(.orange)
                     }
                 }
                 .padding(.horizontal)
                 .padding(.top, 4)
                 
-                // Direkt Link Ekleme Kutusu
                 HStack {
                     TextField("Direkt indirme linkini yapıştır...", text: $directLinkInput)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -917,9 +970,9 @@ struct DownloadsTabView: View {
                         Image(systemName: "bolt.shield.fill")
                             .font(.system(size: 48))
                             .foregroundColor(.blue)
-                        Text("Nükleer Arkaplan Hazır")
+                        Text("Nükleer Arkaplan v2.1 Hazır")
                             .font(.headline)
-                        Text("İndirme başladığında Dynamic Island'a ve Kilit Ekranına canlı yüzde (%) ve hız göstergesi yerleşir.")
+                        Text("Yukarıdaki turuncu şalteri açarak sesi ve Dynamic Island'ı hemen test edebilirsin.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -935,7 +988,7 @@ struct DownloadsTabView: View {
                     .listStyle(PlainListStyle())
                 }
             }
-            .navigationTitle("ImmortalDL v2")
+            .navigationTitle("ImmortalDL v2.1")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
